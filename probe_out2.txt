@@ -1,0 +1,1 @@
+﻿Error object: {"code":"23502","details":"Failing row contains (acdc489d-32da-44a2-8076-d77e1e28b921, null, null, 2026-03-19 09:54:51.004119+00, null).","hint":null,"message":"null value in column \"text\" of relation \"messages\" violates not-null constraint"}

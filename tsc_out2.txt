@@ -1,0 +1,2 @@
+﻿src/App.tsx(12,19): error TS2339: Property 'getCurrentSession' does not exist on type 'Auth'.
+src/App.tsx(12,47): error TS7031: Binding element 'data' implicitly has an 'any' type.

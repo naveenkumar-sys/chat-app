@@ -45,6 +45,13 @@ export default function Chat({ user }: ChatProps) {
     chat_bubble_color: '#4f46e5',
     chat_background_color: '#0b0f19'
   });
+  const [draftProfile, setDraftProfile] = useState({
+    name: '',
+    bio: '',
+    avatar_url: '',
+    chat_bubble_color: '#4f46e5',
+    chat_background_color: '#0b0f19'
+  });
   const [isSaving, setIsSaving] = useState(false);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -209,6 +216,7 @@ export default function Chat({ user }: ChatProps) {
             const next = new Map(prev);
             const existing = next.get(payload.user_id);
             next.set(payload.user_id, {
+              ...(existing || {}),
               id: payload.user_id,
               email: payload.email,
               isOnline: true,
@@ -217,6 +225,35 @@ export default function Chat({ user }: ChatProps) {
             });
             return next;
           });
+        });
+
+        // Listen to profile updates
+        insforge.realtime.on('profile_update', (msg: any) => {
+          const payload = msg.payload || msg;
+          if (!payload || !payload.id) return;
+          
+          if (payload.id === user.id) {
+             setMyProfile(prev => ({
+                ...prev,
+                name: payload.name ?? prev.name,
+                avatar_url: payload.avatar_url ?? prev.avatar_url,
+                chat_bubble_color: payload.chat_bubble_color ?? prev.chat_bubble_color,
+                chat_background_color: payload.chat_background_color ?? prev.chat_background_color
+             }));
+          } else {
+             setContacts(prev => {
+                const next = new Map(prev);
+                const contact = next.get(payload.id);
+                if (contact) {
+                   next.set(payload.id, {
+                      ...contact,
+                      name: payload.name ?? contact.name,
+                      avatar_url: payload.avatar_url ?? contact.avatar_url
+                   });
+                }
+                return next;
+             });
+          }
         });
 
         // Broadcast presence
@@ -364,20 +401,36 @@ export default function Chat({ user }: ChatProps) {
   const handleProfileUpdate = async (e: FormEvent) => {
     e.preventDefault();
     setIsSaving(true);
-    const { error } = await insforge.database
+    const { error: updateError } = await insforge.database
       .from('profiles')
       .update({
-        name: myProfile.name,
-        bio: myProfile.bio,
-        avatar_url: myProfile.avatar_url,
-        chat_bubble_color: myProfile.chat_bubble_color,
-        chat_background_color: myProfile.chat_background_color
+        name: draftProfile.name,
+        bio: draftProfile.bio,
+        avatar_url: draftProfile.avatar_url,
+        chat_bubble_color: draftProfile.chat_bubble_color,
+        chat_background_color: draftProfile.chat_background_color
       })
-      .eq('id', user.id);
+      .eq('id', user.id)
+      .select()
+      .single();
     
     setIsSaving(false);
-    if (!error) {
+    if (!updateError) {
+      setMyProfile({ ...draftProfile });
       setShowSettings(false);
+      
+      // Notify other clients instantly
+      if (insforge.realtime.isConnected) {
+        insforge.realtime.publish('chat:room-1', 'profile_update', {
+          id: user.id,
+          name: draftProfile.name,
+          avatar_url: draftProfile.avatar_url,
+          chat_bubble_color: draftProfile.chat_bubble_color,
+          chat_background_color: draftProfile.chat_background_color
+        });
+      }
+    } else {
+      console.error("Profile update failed:", updateError);
     }
   };
 
@@ -388,8 +441,9 @@ export default function Chat({ user }: ChatProps) {
     setIsSaving(true);
     try {
       const { data, error } = await insforge.storage.from('chat-attachments').uploadAuto(file);
+      if (error) console.error("Avatar upload failed:", error);
       if (data?.url) {
-        setMyProfile(prev => ({ ...prev, avatar_url: data.url }));
+        setDraftProfile(prev => ({ ...prev, avatar_url: data.url }));
       }
     } finally {
       setIsSaving(false);
@@ -407,7 +461,10 @@ export default function Chat({ user }: ChatProps) {
             <h2 className="text-xl font-bold text-white">Messages</h2>
             <div className="flex items-center gap-2">
               <button 
-                onClick={() => setShowSettings(true)}
+                onClick={() => {
+                  setDraftProfile({ ...myProfile });
+                  setShowSettings(true);
+                }}
                 className="p-2 hover:bg-neutral-800 rounded-lg text-neutral-400 hover:text-white transition-colors"
                 title="Settings"
               >
@@ -631,7 +688,16 @@ export default function Chat({ user }: ChatProps) {
                   <button
                     type="button"
                     title="Change background color"
-                    onClick={() => setMyProfile(prev => ({ ...prev, chat_background_color: prev.chat_background_color === '#0b0f19' ? '#1a1c2e' : '#0b0f19' }))}
+                    onClick={() => {
+                      const newColor = myProfile.chat_background_color === '#0b0f19' ? '#1a1c2e' : '#0b0f19';
+                      setMyProfile(prev => ({ ...prev, chat_background_color: newColor }));
+                      
+                      // Save directly to backend
+                      insforge.database.from('profiles').update({ chat_background_color: newColor }).eq('id', user.id);
+                      if (insforge.realtime.isConnected) {
+                        insforge.realtime.publish('chat:room-1', 'profile_update', { id: user.id, chat_background_color: newColor });
+                      }
+                    }}
                     className="p-2 text-neutral-400 hover:text-white hover:bg-neutral-800 rounded-xl transition-colors"
                   >
                     <Palette className="w-6 h-6" />
@@ -708,8 +774,8 @@ export default function Chat({ user }: ChatProps) {
               <div className="flex flex-col items-center gap-4 py-4">
                 <div className="relative group">
                   <div className="w-24 h-24 rounded-full bg-neutral-800 flex items-center justify-center overflow-hidden border-4 border-indigo-600/30">
-                    {myProfile.avatar_url ? (
-                      <img src={myProfile.avatar_url} className="w-full h-full object-cover" />
+                    {draftProfile.avatar_url ? (
+                      <img src={draftProfile.avatar_url} className="w-full h-full object-cover" />
                     ) : (
                       <span className="text-4xl font-bold">{user.email[0].toUpperCase()}</span>
                     )}
@@ -737,8 +803,8 @@ export default function Chat({ user }: ChatProps) {
                   <label className="block text-sm font-bold text-neutral-400 mb-1.5 ml-1">Display Name</label>
                   <input 
                     type="text" 
-                    value={myProfile.name}
-                    onChange={e => setMyProfile(prev => ({ ...prev, name: e.target.value }))}
+                    value={draftProfile.name}
+                    onChange={e => setDraftProfile(prev => ({ ...prev, name: e.target.value }))}
                     placeholder="Set your display name..."
                     className="w-full bg-neutral-950 border border-neutral-800 rounded-2xl py-3 px-5 outline-none focus:border-indigo-500 transition-all font-medium"
                   />
@@ -747,8 +813,8 @@ export default function Chat({ user }: ChatProps) {
                 <div>
                   <label className="block text-sm font-bold text-neutral-400 mb-1.5 ml-1">About / Bio</label>
                   <textarea 
-                    value={myProfile.bio}
-                    onChange={e => setMyProfile(prev => ({ ...prev, bio: e.target.value }))}
+                    value={draftProfile.bio}
+                    onChange={e => setDraftProfile(prev => ({ ...prev, bio: e.target.value }))}
                     placeholder="Tell us something about yourself..."
                     className="w-full bg-neutral-950 border border-neutral-800 rounded-2xl py-3 px-5 outline-none focus:border-indigo-500 transition-all min-h-[100px] resize-none"
                   />
@@ -760,11 +826,11 @@ export default function Chat({ user }: ChatProps) {
                     <div className="flex items-center gap-3 bg-neutral-950 p-2 rounded-2xl border border-neutral-800">
                       <input 
                         type="color" 
-                        value={myProfile.chat_bubble_color}
-                        onChange={e => setMyProfile(prev => ({ ...prev, chat_bubble_color: e.target.value }))}
+                        value={draftProfile.chat_bubble_color}
+                        onChange={e => setDraftProfile(prev => ({ ...prev, chat_bubble_color: e.target.value }))}
                         className="w-10 h-10 rounded-xl bg-transparent border-none cursor-pointer"
                       />
-                      <span className="text-xs font-mono">{myProfile.chat_bubble_color}</span>
+                      <span className="text-xs font-mono">{draftProfile.chat_bubble_color}</span>
                     </div>
                   </div>
                   <div>
@@ -772,11 +838,11 @@ export default function Chat({ user }: ChatProps) {
                     <div className="flex items-center gap-3 bg-neutral-950 p-2 rounded-2xl border border-neutral-800">
                       <input 
                         type="color" 
-                        value={myProfile.chat_background_color}
-                        onChange={e => setMyProfile(prev => ({ ...prev, chat_background_color: e.target.value }))}
+                        value={draftProfile.chat_background_color}
+                        onChange={e => setDraftProfile(prev => ({ ...prev, chat_background_color: e.target.value }))}
                         className="w-10 h-10 rounded-xl bg-transparent border-none cursor-pointer"
                       />
-                      <span className="text-xs font-mono">{myProfile.chat_background_color}</span>
+                      <span className="text-xs font-mono">{draftProfile.chat_background_color}</span>
                     </div>
                   </div>
                 </div>

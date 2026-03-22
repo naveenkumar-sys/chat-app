@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef, FormEvent } from 'react';
 import { insforge } from '../lib/insforge';
-import { Send, UserCircle2, MessageSquareOff, ChevronLeft, Image as ImageIcon, Smile, Loader2, Settings, User, Palette, X, MoreVertical, Trash2, ChevronDown } from 'lucide-react';
+import { Send, UserCircle2, MessageSquareOff, ChevronLeft, Image as ImageIcon, Smile, Loader2, Settings, User, Palette, X, MoreVertical, Trash2, ChevronDown, Users, Plus, Search, Info, LogOut } from 'lucide-react';
 
 interface DirectMessage {
   id: string;
@@ -14,6 +14,15 @@ interface DirectMessage {
   created_at: string;
   deleted_for_sender?: boolean;
   deleted_for_receiver?: boolean;
+  group_id?: string;
+}
+
+interface Group {
+  id: string;
+  name: string;
+  creator_id: string;
+  avatar_url?: string;
+  created_at: string;
 }
 
 interface UserProfile {
@@ -36,10 +45,18 @@ export default function Chat({ user }: ChatProps) {
   
   // Track all users we interact with, plus currently online users
   const [contacts, setContacts] = useState<Map<string, UserProfile>>(new Map());
+  const [groups, setGroups] = useState<Group[]>([]);
   const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
+  const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
   const [isUploading, setIsUploading] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showCreateGroup, setShowCreateGroup] = useState(false);
+  const [showGroupInfo, setShowGroupInfo] = useState(false);
+  const [groupMembersList, setGroupMembersList] = useState<string[]>([]);
+  const [newGroupName, setNewGroupName] = useState('');
+  const [selectedMembers, setSelectedMembers] = useState<string[]>([]);
   const [myProfile, setMyProfile] = useState({
     name: '',
     bio: '',
@@ -119,15 +136,37 @@ export default function Chat({ user }: ChatProps) {
     fetchUsers();
   }, [user.id]);
 
-  // Handle switching users - Load conversation history
+  // Load my groups
   useEffect(() => {
-    if (!user || !selectedUserId) return;
+    const fetchGroups = async () => {
+      const { data, error } = await insforge.database
+        .from('group_members')
+        .select('groups(*)')
+        .eq('user_id', user.id);
+      
+      if (data && !error) {
+        setGroups(data.map((item: any) => item.groups));
+      }
+    };
+    fetchGroups();
+  }, [user.id]);
+
+  // Handle switching users/groups - Load conversation history
+  useEffect(() => {
+    if (!user || (!selectedUserId && !selectedGroupId)) return;
 
     const fetchHistory = async () => {
-      const { data, error } = await insforge.database
-        .from('messages') // Using 'messages' table based on screenshot
-        .select('*')
-        .or(`and(sender_id.eq.${user.id},receiver_id.eq.${selectedUserId}),and(sender_id.eq.${selectedUserId},receiver_id.eq.${user.id})`)
+      let query = insforge.database
+        .from('messages')
+        .select('*');
+
+      if (selectedGroupId) {
+        query = query.eq('group_id', selectedGroupId);
+      } else {
+        query = query.or(`and(sender_id.eq.${user.id},receiver_id.eq.${selectedUserId}),and(sender_id.eq.${selectedUserId},receiver_id.eq.${user.id})`);
+      }
+
+      const { data, error } = await query
         .order('created_at', { ascending: false })
         .limit(50);
       
@@ -137,7 +176,7 @@ export default function Chat({ user }: ChatProps) {
     };
 
     fetchHistory();
-  }, [selectedUserId, user]);
+  }, [selectedUserId, selectedGroupId, user.id]);
 
   // Realtime setup for incoming messages and presence
   useEffect(() => {
@@ -178,10 +217,31 @@ export default function Chat({ user }: ChatProps) {
           }
 
           // Does this message belong to my active chat?
-          const isRelevantToActiveChat = 
-             selectedUserId && 
-             ((msg.sender_id === user.id && msg.receiver_id === selectedUserId) ||
-              (msg.sender_id === selectedUserId && msg.receiver_id === user.id));
+          if (msg.group_id) {
+             setGroups(prev => {
+                if (!prev.some(g => g.id === msg.group_id)) {
+                   insforge.database.from('group_members').select('groups(*)').eq('group_id', msg.group_id).eq('user_id', user.id).single().then(({data}) => {
+                      if (data?.groups) {
+                         const groupData = Array.isArray(data.groups) ? data.groups[0] : data.groups;
+                         const fetchedGroup = groupData as unknown as Group;
+                         if (fetchedGroup?.id) {
+                            setGroups(curr => curr.some(x => x.id === fetchedGroup.id) ? curr : [...curr, fetchedGroup]);
+                         }
+                      }
+                   });
+                }
+                return prev;
+             });
+          }
+
+          let isRelevantToActiveChat = false;
+          if (msg.group_id) {
+             isRelevantToActiveChat = selectedGroupId === msg.group_id;
+          } else {
+             isRelevantToActiveChat = !!selectedUserId && 
+              ((msg.sender_id === user.id && msg.receiver_id === selectedUserId) ||
+               (msg.sender_id === selectedUserId && msg.receiver_id === user.id));
+          }
 
           if (isRelevantToActiveChat) {
             setMessages(prev => {
@@ -316,28 +376,26 @@ export default function Chat({ user }: ChatProps) {
       if (cleanupInterval) clearInterval(cleanupInterval);
       insforge.realtime.unsubscribe('chat:room-1');
     };
-  }, [user, selectedUserId]);
+  }, [user, selectedUserId, selectedGroupId]);
 
   const handleSend = async (e?: FormEvent, textContent?: string, imageUrl?: string) => {
     e?.preventDefault();
-    if ((!newMessage.trim() && !textContent && !imageUrl) || !user || !selectedUserId) return;
+    if ((!newMessage.trim() && !textContent && !imageUrl) || !user || (!selectedUserId && !selectedGroupId)) return;
 
     const text = textContent || newMessage.trim() || null;
     const imgUrl = imageUrl || undefined;
     
     if (!textContent) setNewMessage('');
     
-    const recipient = contacts.get(selectedUserId);
-    if (!recipient) return;
-
     // Optimistic UI update
     const tempId = crypto.randomUUID();
     const tempMsg: DirectMessage = {
       id: tempId,
       sender_id: user.id,
       sender_email: user.email,
-      receiver_id: selectedUserId,
-      receiver_email: recipient.email,
+      receiver_id: selectedUserId || '',
+      receiver_email: selectedUserId ? contacts.get(selectedUserId)?.email || '' : '',
+      group_id: selectedGroupId || undefined,
       text,
       image_url: imgUrl,
       created_at: new Date().toISOString()
@@ -345,17 +403,24 @@ export default function Chat({ user }: ChatProps) {
     
     setMessages(prev => [...prev, tempMsg]);
 
+    const insertData: any = {
+      sender_id: user.id,
+      sender_email: user.email,
+      text,
+      image_url: imgUrl,
+      client_id: tempId
+    };
+
+    if (selectedGroupId) {
+      insertData.group_id = selectedGroupId;
+    } else {
+      insertData.receiver_id = selectedUserId;
+      insertData.receiver_email = contacts.get(selectedUserId!)?.email;
+    }
+
     const { data, error } = await insforge.database
-      .from('messages') // Using 'messages' table based on screenshot
-      .insert({
-        sender_id: user.id,
-        sender_email: user.email,
-        receiver_id: selectedUserId,
-        receiver_email: recipient.email,
-        text, // Using 'text' instead of 'content' based on screenshot
-        image_url: imgUrl,
-        client_id: tempId
-      })
+      .from('messages') 
+      .insert(insertData)
       .select('id, created_at')
       .single();
       
@@ -404,6 +469,48 @@ export default function Chat({ user }: ChatProps) {
   
   const handleTouchEnd = () => {
     if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
+  };
+
+  const loadGroupMembers = async (gid: string) => {
+    const { data } = await insforge.database.from('group_members').select('user_id').eq('group_id', gid);
+    if (data) setGroupMembersList(data.map((m: any) => m.user_id));
+  };
+
+  useEffect(() => {
+    if (showGroupInfo && selectedGroupId) {
+       loadGroupMembers(selectedGroupId);
+    }
+  }, [showGroupInfo, selectedGroupId]);
+
+  const createGroup = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!newGroupName.trim() || selectedMembers.length === 0) return;
+    setIsSaving(true);
+    
+    // 1. Create the base group
+    const { data: groupData, error: groupError } = await insforge.database
+      .from('groups')
+      .insert({ name: newGroupName.trim(), creator_id: user.id })
+      .select()
+      .single();
+      
+    if (groupData && !groupError) {
+      // 2. Add creator and all selected members
+      const membersToInsert = [
+        { group_id: groupData.id, user_id: user.id },
+        ...selectedMembers.map(uid => ({ group_id: groupData.id, user_id: uid }))
+      ];
+      
+      await insforge.database.from('group_members').insert(membersToInsert);
+      
+      setGroups(prev => [...prev, groupData]);
+      setNewGroupName('');
+      setSelectedMembers([]);
+      setShowCreateGroup(false);
+      setSelectedGroupId(groupData.id);
+      setSelectedUserId(null);
+    }
+    setIsSaving(false);
   };
 
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -519,6 +626,13 @@ export default function Chat({ user }: ChatProps) {
             <h2 className="text-xl font-bold text-white">Messages</h2>
             <div className="flex items-center gap-2">
               <button 
+                onClick={() => setShowCreateGroup(true)}
+                className="p-2 hover:bg-neutral-800 rounded-lg text-neutral-400 hover:text-white transition-colors"
+                title="Create Group"
+              >
+                <Plus className="w-5 h-5" />
+              </button>
+              <button 
                 onClick={() => {
                   setDraftProfile({ ...myProfile });
                   setShowSettings(true);
@@ -528,82 +642,124 @@ export default function Chat({ user }: ChatProps) {
               >
                 <Settings className="w-5 h-5" />
               </button>
-              <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-green-500/10 border border-green-500/20">
-                <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-                <span className="text-[10px] uppercase font-bold text-green-500 tracking-wider">
-                  {Array.from(contacts.values()).filter(c => c.isOnline).length} Active
-                </span>
-              </div>
             </div>
           </div>
           <div className="mt-4 relative group">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-500 group-focus-within:text-indigo-500 transition-colors" />
             <input 
               type="text" 
-              placeholder="Search conversations..." 
-              className="w-full bg-neutral-900 border border-neutral-800 text-sm rounded-xl py-2.5 px-4 outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/30 transition-all text-neutral-300 placeholder:text-neutral-500"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search people or groups..." 
+              className="w-full bg-neutral-900 border border-neutral-800 text-sm rounded-xl py-2.5 pl-10 pr-4 outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/30 transition-all text-neutral-300 placeholder:text-neutral-500"
             />
           </div>
         </div>
         
         <div className="flex-1 overflow-y-auto p-2 space-y-1 scrollbar-hide">
-          {contacts.size === 0 ? (
+          {/* Groups Section */}
+          {groups.filter(g => g.name.toLowerCase().includes(searchQuery.toLowerCase())).length > 0 && (
+            <div className="px-3 py-2">
+               <p className="text-[10px] font-bold text-neutral-500 uppercase tracking-widest">Groups</p>
+            </div>
+          )}
+          {groups
+            .filter(g => g.name.toLowerCase().includes(searchQuery.toLowerCase()))
+            .map(group => (
+              <button
+                key={group.id}
+                onClick={() => {
+                  setSelectedGroupId(group.id);
+                  setSelectedUserId(null);
+                }}
+                className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all relative group
+                  ${selectedGroupId === group.id 
+                    ? 'bg-indigo-600/10 border-indigo-500/20' 
+                    : 'hover:bg-neutral-900/50'}`}
+              >
+                <div className="relative shrink-0">
+                  <div className={`w-12 h-12 rounded-full flex items-center justify-center bg-indigo-600/20 text-indigo-400 border border-indigo-500/30 shadow-xl transition-all ${selectedGroupId === group.id ? 'ring-4 ring-indigo-600/20' : ''}`}>
+                    <Users className="w-6 h-6" />
+                  </div>
+                </div>
+                <div className="flex-1 min-w-0 text-left">
+                  <p className={`text-[15px] font-bold truncate ${selectedGroupId === group.id ? 'text-indigo-400' : 'text-neutral-200'}`}>
+                    {group.name}
+                  </p>
+                  <p className="text-xs text-neutral-500 truncate">Group Chat</p>
+                </div>
+              </button>
+          ))}
+
+          {/* Contacts Section */}
+          <div className="px-3 py-2 mt-4">
+               <p className="text-[10px] font-bold text-neutral-500 uppercase tracking-widest">Direct Messages</p>
+          </div>
+          {Array.from(contacts.values())
+            .filter(c => (c.name || c.email).toLowerCase().includes(searchQuery.toLowerCase()))
+            .length === 0 ? (
             <div className="p-10 text-center text-sm text-neutral-600 space-y-3">
               <UserCircle2 className="w-12 h-12 mx-auto opacity-10" />
-              <p>No contacts found yet</p>
+              <p>No matches found</p>
             </div>
           ) : (
-            Array.from(contacts.values()).map(contact => {
-              const isActive = selectedUserId === contact.id;
-              return (
-                <button
-                  key={contact.id}
-                  onClick={() => setSelectedUserId(contact.id)}
-                  className={`w-full flex items-center gap-3 px-4 py-4 rounded-xl transition-all relative group
-                    ${isActive 
-                      ? 'bg-indigo-600/10 border-indigo-500/20' 
-                      : 'hover:bg-neutral-900/50'}`}
-                >
-                  {isActive && <div className="absolute left-0 top-3 bottom-3 w-1 bg-indigo-500 rounded-r-full" />}
-                  <div className="relative shrink-0">
-                  <div className={`w-12 h-12 rounded-full flex items-center justify-center text-lg font-bold text-white shadow-xl transition-all ${isActive ? 'bg-indigo-600 ring-4 ring-indigo-600/20' : 'bg-neutral-800'}`}>
-                    {contact.avatar_url ? (
-                      <img src={contact.avatar_url} className="w-full h-full rounded-full object-cover" />
-                    ) : (
-                      (contact.name || contact.email).charAt(0).toUpperCase()
-                    )}
-                  </div>
-                    {contact.isOnline ? (
-                      <div className="absolute bottom-0 right-0 w-3.5 h-3.5 bg-neutral-950 rounded-full flex items-center justify-center">
-                        <div className="w-2.5 h-2.5 rounded-full bg-green-500 ring-2 ring-neutral-950" />
-                      </div>
-                    ) : (
-                      <div className="absolute bottom-0 right-0 w-3.5 h-3.5 bg-neutral-950 rounded-full flex items-center justify-center">
-                        <div className="w-2.5 h-2.5 rounded-full bg-neutral-600 ring-2 ring-neutral-950" />
-                      </div>
-                    )}
-                  </div>
-                  <div className="flex-1 min-w-0 text-left">
-                    <div className="flex justify-between items-baseline mb-0.5">
-                      <p className={`text-[15px] font-bold truncate ${isActive ? 'text-indigo-400' : 'text-neutral-200'}`}>
-                        {contact.name || contact.email.split('@')[0]}
-                      </p>
+            Array.from(contacts.values())
+              .filter(c => (c.name || c.email).toLowerCase().includes(searchQuery.toLowerCase()))
+              .map(contact => {
+                const isActive = selectedUserId === contact.id;
+                return (
+                  <button
+                    key={contact.id}
+                    onClick={() => {
+                       setSelectedUserId(contact.id);
+                       setSelectedGroupId(null);
+                    }}
+                    className={`w-full flex items-center gap-3 px-4 py-4 rounded-xl transition-all relative group
+                      ${isActive 
+                        ? 'bg-indigo-600/10 border-indigo-500/20' 
+                        : 'hover:bg-neutral-900/50'}`}
+                  >
+                    {isActive && <div className="absolute left-0 top-3 bottom-3 w-1 bg-indigo-500 rounded-r-full" />}
+                    <div className="relative shrink-0">
+                    <div className={`w-12 h-12 rounded-full flex items-center justify-center text-lg font-bold text-white shadow-xl transition-all ${isActive ? 'bg-indigo-600 ring-4 ring-indigo-600/20' : 'bg-neutral-800'}`}>
+                      {contact.avatar_url ? (
+                        <img src={contact.avatar_url} className="w-full h-full rounded-full object-cover" />
+                      ) : (
+                        (contact.name || contact.email).charAt(0).toUpperCase()
+                      )}
                     </div>
-                    <div className="flex items-center gap-1.5">
-                       <p className={`text-xs truncate ${contact.isTyping ? 'text-indigo-400 animate-pulse font-bold' : contact.isOnline ? 'text-green-500' : 'text-neutral-500'}`}>
-                        {contact.isTyping ? 'typing...' : contact.isOnline ? 'Active Now' : 'Offline'}
-                      </p>
+                      {contact.isOnline ? (
+                        <div className="absolute bottom-0 right-0 w-3.5 h-3.5 bg-neutral-950 rounded-full flex items-center justify-center">
+                          <div className="w-2.5 h-2.5 rounded-full bg-green-500 ring-2 ring-neutral-950" />
+                        </div>
+                      ) : (
+                        <div className="absolute bottom-0 right-0 w-3.5 h-3.5 bg-neutral-950 rounded-full flex items-center justify-center">
+                          <div className="w-2.5 h-2.5 rounded-full bg-neutral-600 ring-2 ring-neutral-950" />
+                        </div>
+                      )}
                     </div>
-                  </div>
-                </button>
-              );
-            })
+                    <div className="flex-1 min-w-0 text-left">
+                      <div className="flex justify-between items-baseline mb-0.5">
+                        <p className={`text-[15px] font-bold truncate ${isActive ? 'text-indigo-400' : 'text-neutral-200'}`}>
+                          {contact.name || contact.email.split('@')[0]}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                         <p className={`text-xs truncate ${contact.isTyping ? 'text-indigo-400 animate-pulse font-bold' : contact.isOnline ? 'text-green-500' : 'text-neutral-500'}`}>
+                          {contact.isTyping ? 'typing...' : contact.isOnline ? 'Active Now' : 'Offline'}
+                        </p>
+                      </div>
+                    </div>
+                  </button>
+                );
+              })
           )}
         </div>
       </div>
 
       {/* Main Chat Area */}
       <div 
-        className={`flex-1 flex flex-col relative w-full overflow-hidden ${!selectedUserId ? 'hidden sm:flex' : 'flex'}`} 
+        className={`flex-1 flex flex-col relative w-full overflow-hidden ${(!selectedUserId && !selectedGroupId) ? 'hidden sm:flex' : 'flex'}`} 
         style={{ 
           backgroundColor: myProfile.chat_background_color,
           backgroundImage: myProfile.chat_background_image ? `url(${myProfile.chat_background_image})` : 'none',
@@ -612,7 +768,7 @@ export default function Chat({ user }: ChatProps) {
           backgroundRepeat: 'no-repeat'
         }}
       >
-        {!selectedUserId ? (
+        {(!selectedUserId && !selectedGroupId) ? (
           <div className="flex-1 flex flex-col items-center justify-center text-neutral-500 space-y-6 p-8 relative">
             <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,_rgba(79,70,229,0.05)_0%,_transparent_70%)]" />
             <div className="w-24 h-24 rounded-[32px] bg-neutral-900/50 flex items-center justify-center shadow-inner relative z-10 border border-neutral-800/30">
@@ -637,13 +793,15 @@ export default function Chat({ user }: ChatProps) {
               <div className="flex items-center gap-4">
                 <div className="relative">
                   <div className="w-11 h-11 rounded-full bg-neutral-800 ring-2 ring-neutral-800 flex items-center justify-center text-base font-bold text-white shadow-xl overflow-hidden">
-                    {selectedContact?.avatar_url ? (
+                    {selectedGroupId ? (
+                      <Users className="w-6 h-6 text-indigo-400" />
+                    ) : selectedContact?.avatar_url ? (
                       <img src={selectedContact.avatar_url} className="w-full h-full object-cover" />
                     ) : (
                       (selectedContact?.name || selectedContact?.email || '?').charAt(0).toUpperCase()
                     )}
                   </div>
-                  {selectedContact?.isOnline && (
+                  {!selectedGroupId && selectedContact?.isOnline && (
                     <div className="absolute bottom-0 right-0 w-3 h-3 bg-[#0B0F19] rounded-full flex items-center justify-center ring-2 ring-[#0B0F19]">
                       <div className="w-2 h-2 rounded-full bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.6)]" />
                     </div>
@@ -651,13 +809,19 @@ export default function Chat({ user }: ChatProps) {
                 </div>
                 <div>
                   <h3 className="text-lg font-bold text-neutral-100 leading-tight">
-                    {selectedContact?.name || selectedContact?.email?.split('@')[0]}
+                    {selectedGroupId ? groups.find(g => g.id === selectedGroupId)?.name : (selectedContact?.name || selectedContact?.email?.split('@')[0])}
                   </h3>
                   <div className="flex items-center gap-1.5 mt-0.5">
-                    <div className={`w-1.5 h-1.5 rounded-full ${selectedContact?.isTyping ? 'bg-indigo-400 animate-pulse' : selectedContact?.isOnline ? 'bg-green-500 animate-pulse' : 'bg-neutral-600'}`} />
-                    <p className={`text-xs font-bold uppercase tracking-widest ${selectedContact?.isTyping ? 'text-indigo-400' : selectedContact?.isOnline ? 'text-green-500/80' : 'text-neutral-500'}`}>
-                      {selectedContact?.isTyping ? 'Typing...' : selectedContact?.isOnline ? 'Online' : 'Offline'}
-                    </p>
+                    {selectedGroupId ? (
+                      <p className="text-xs font-bold uppercase tracking-widest text-indigo-400">Group Chat</p>
+                    ) : (
+                      <>
+                        <div className={`w-1.5 h-1.5 rounded-full ${selectedContact?.isTyping ? 'bg-indigo-400 animate-pulse' : selectedContact?.isOnline ? 'bg-green-500 animate-pulse' : 'bg-neutral-600'}`} />
+                        <p className={`text-xs font-bold uppercase tracking-widest ${selectedContact?.isTyping ? 'text-indigo-400' : selectedContact?.isOnline ? 'text-green-500/80' : 'text-neutral-500'}`}>
+                          {selectedContact?.isTyping ? 'Typing...' : selectedContact?.isOnline ? 'Online' : 'Offline'}
+                        </p>
+                      </>
+                    )}
                   </div>
                 </div>
               </div>
@@ -674,16 +838,30 @@ export default function Chat({ user }: ChatProps) {
                   <>
                     <div className="fixed inset-0 z-40" onClick={() => setShowChatMenu(false)} />
                     <div className="absolute right-0 top-full mt-2 w-48 bg-neutral-900 border border-neutral-800 rounded-xl shadow-2xl overflow-hidden z-50 animate-in fade-in slide-in-from-top-2">
+                      {selectedGroupId && (
+                         <button
+                           onClick={() => {
+                             setShowChatMenu(false);
+                             setShowGroupInfo(true);
+                           }}
+                           className="w-full px-4 py-3 text-sm font-bold text-neutral-300 hover:text-white hover:bg-neutral-800 flex items-center gap-3 transition-colors text-left border-b border-neutral-800/50"
+                         >
+                           <Info className="w-4 h-4" />
+                           Group Info
+                         </button>
+                      )}
                       <button
                         onClick={async () => {
                           setShowChatMenu(false);
-                          if (!user || !selectedUserId || !confirm('Are you sure you want to clear this entire chat history globally?')) return;
+                          if (!user || (!selectedUserId && !selectedGroupId) || !confirm('Are you sure you want to clear this entire chat history globally?')) return;
                           
                           setMessages([]);
-                          await insforge.database
-                            .from('messages')
-                            .delete()
-                            .or(`and(sender_id.eq.${user.id},receiver_id.eq.${selectedUserId}),and(sender_id.eq.${selectedUserId},receiver_id.eq.${user.id})`);
+                          const clearQuery = insforge.database.from('messages').delete();
+                          if (selectedGroupId) {
+                            await clearQuery.eq('group_id', selectedGroupId);
+                          } else {
+                            await clearQuery.or(`and(sender_id.eq.${user.id},receiver_id.eq.${selectedUserId}),and(sender_id.eq.${selectedUserId},receiver_id.eq.${user.id})`);
+                          }
                         }}
                         className="w-full px-4 py-3 text-sm font-bold text-red-400 hover:text-red-300 hover:bg-neutral-800 flex items-center gap-3 transition-colors text-left"
                       >
@@ -719,7 +897,7 @@ export default function Chat({ user }: ChatProps) {
                       : { name: contacts.get(msg.sender_id)?.name, avatar_url: contacts.get(msg.sender_id)?.avatar_url, email: msg.sender_email };
 
                     return (
-                      <div key={msg.id} className={`flex flex-col ${isMe ? 'items-end' : 'items-start'} w-full animate-in fade-in zoom-in-95 duration-200 mt-0.5`}>
+                      <div key={msg.id} className={`flex flex-col ${isMe ? 'items-end' : 'items-start'} w-full animate-in fade-in zoom-in-95 duration-200 mt-0.5 relative ${msgMenuOpen === msg.id ? 'z-50' : 'z-0'}`}>
                         {!sameSenderAsPrev && (
                           <div className={`flex items-center gap-2 mb-1 mt-4 px-1 ${isMe ? 'flex-row-reverse' : 'flex-row'}`}>
                             <div className="w-6 h-6 rounded-full bg-neutral-800 flex items-center justify-center overflow-hidden text-[10px] font-bold text-white shrink-0 ring-1 ring-neutral-700/50 shadow-sm">
@@ -735,7 +913,7 @@ export default function Chat({ user }: ChatProps) {
                           </div>
                         )}
                         <div 
-                          className={`relative max-w-[85%] sm:max-w-[70%] shadow-xl leading-relaxed break-words whitespace-pre-wrap group/msgbubble transition-all select-none sm:select-text ${
+                          className={`relative max-w-[85%] sm:max-w-[70%] min-w-[85px] shadow-xl leading-relaxed break-words whitespace-pre-wrap group/msgbubble transition-all select-none sm:select-text ${
                             isMe 
                               ? 'text-white rounded-[20px] rounded-tr-[4px]' 
                               : 'bg-neutral-800 text-neutral-100 rounded-[20px] rounded-tl-[4px] border border-neutral-700/30 backdrop-blur-md'
@@ -808,7 +986,7 @@ export default function Chat({ user }: ChatProps) {
                             </div>
                           )}
 
-                          <div className={msg.image_url ? "" : "px-4 pt-2.5"}>
+                          <div className={msg.image_url ? "" : "px-4 py-2.5"}>
                             {msg.image_url && (
                                <div className="p-1">
                                  <img 
@@ -819,12 +997,14 @@ export default function Chat({ user }: ChatProps) {
                                  />
                                </div>
                             )}
-                            {msg.text && (
-                                <p className="text-[15px]">{msg.text}</p>
-                            )}
-                          </div>
-                          <div className={`text-[10px] pb-1.5 pr-3 text-right font-medium opacity-60 ${!msg.text && !msg.image_url ? '-mt-6' : ''}`}>
-                            {new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                            <div className="flex flex-wrap items-end gap-x-4 gap-y-1">
+                              {msg.text && (
+                                  <p className="text-[15px] flex-1 min-w-0">{msg.text}</p>
+                              )}
+                              <div className={`text-[10px] font-medium opacity-60 ml-auto whitespace-nowrap ${msg.image_url && !msg.text ? 'p-2 pt-0' : 'pb-0.5'}`}>
+                                {new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                              </div>
+                            </div>
                           </div>
                         </div>
                       </div>
@@ -1067,6 +1247,174 @@ export default function Chat({ user }: ChatProps) {
               </button>
             </form>
           </div>
+        </div>
+      )}
+
+      {/* Create Group Modal */}
+      {showCreateGroup && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-300">
+           <div className="bg-neutral-900 border border-neutral-800 rounded-3xl w-full max-w-md overflow-hidden shadow-2xl animate-in zoom-in-95">
+              <div className="p-6 border-b border-neutral-800 flex justify-between items-center">
+                 <h3 className="text-xl font-bold flex items-center gap-2">
+                    <Users className="text-indigo-500" />
+                    Create New Group
+                 </h3>
+                 <button onClick={() => setShowCreateGroup(false)} className="p-2 hover:bg-neutral-800 rounded-xl transition-colors">
+                    <X className="w-6 h-6" />
+                 </button>
+              </div>
+              <form onSubmit={createGroup} className="p-6 space-y-4">
+                 <div>
+                    <label className="block text-sm font-bold text-neutral-400 mb-1.5 ml-1">Group Name</label>
+                    <input 
+                       type="text" 
+                       value={newGroupName}
+                       onChange={e => setNewGroupName(e.target.value)}
+                       placeholder="Enter group name..."
+                       className="w-full bg-neutral-950 border border-neutral-800 rounded-2xl py-3 px-5 outline-none focus:border-indigo-500 transition-all font-medium mb-4"
+                       autoFocus
+                    />
+                 </div>
+                 <div className="max-h-48 overflow-y-auto space-y-1 bg-neutral-950/50 p-3 rounded-2xl border border-neutral-800/50">
+                     <p className="text-xs font-bold text-neutral-500 mb-3 ml-1 uppercase tracking-wider">Add Members</p>
+                     {Array.from(contacts.values()).map(contact => (
+                       <label key={contact.id} className="flex items-center gap-3 p-2 hover:bg-neutral-800 rounded-xl cursor-pointer transition-colors group/member">
+                         <div className="relative flex items-center justify-center">
+                           <input 
+                             type="checkbox" 
+                             checked={selectedMembers.includes(contact.id)}
+                             onChange={(e) => {
+                               if (e.target.checked) setSelectedMembers(prev => [...prev, contact.id]);
+                               else setSelectedMembers(prev => prev.filter(id => id !== contact.id));
+                             }}
+                             className="peer appearance-none w-5 h-5 rounded-md border border-neutral-600 checked:bg-indigo-500 checked:border-indigo-500 transition-all"
+                           />
+                           <svg className="absolute w-3 h-3 text-white opacity-0 peer-checked:opacity-100 pointer-events-none" viewBox="0 0 14 10" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M1 5L4.5 8.5L13 1" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                         </div>
+                         <div className="w-8 h-8 rounded-full bg-neutral-800 flex items-center justify-center text-xs font-bold shrink-0 overflow-hidden ring-2 ring-transparent group-hover/member:ring-neutral-700 transition-all">
+                           {contact.avatar_url ? <img src={contact.avatar_url} className="w-full h-full object-cover" /> : (contact.name || contact.email).charAt(0).toUpperCase()}
+                         </div>
+                         <div className="flex flex-col flex-1 min-w-0">
+                            <span className={`text-sm font-medium truncate ${selectedMembers.includes(contact.id) ? 'text-indigo-300 font-bold' : 'text-neutral-300'}`}>{contact.name || contact.email.split('@')[0]}</span>
+                         </div>
+                       </label>
+                     ))}
+                     {contacts.size === 0 && <p className="text-sm text-neutral-500 italic p-2">No contacts available to add.</p>}
+                 </div>
+                 <button 
+                    type="submit"
+                    disabled={isSaving || !newGroupName.trim() || selectedMembers.length === 0}
+                    className="w-full bg-indigo-600 hover:bg-indigo-500 py-4 rounded-2xl font-bold text-white shadow-xl shadow-indigo-600/20 transition-all disabled:opacity-50 mt-4"
+                 >
+                    {isSaving ? 'Creating Group...' : `Create Group (${selectedMembers.length + 1})`}
+                 </button>
+              </form>
+           </div>
+        </div>
+      )}
+
+      {/* Group Info Modal */}
+      {showGroupInfo && selectedGroupId && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-300">
+           <div className="bg-neutral-900 border border-neutral-800 rounded-3xl w-full max-w-md overflow-hidden shadow-2xl animate-in zoom-in-95 flex flex-col max-h-[85vh]">
+              <div className="p-6 border-b border-neutral-800 flex justify-between items-center shrink-0">
+                 <h3 className="text-xl font-bold flex items-center gap-2">
+                    <Info className="text-indigo-500 w-6 h-6" />
+                    Group Info
+                 </h3>
+                 <button onClick={() => setShowGroupInfo(false)} className="p-2 hover:bg-neutral-800 rounded-xl transition-colors">
+                    <X className="w-6 h-6" />
+                 </button>
+              </div>
+              <div className="p-6 overflow-y-auto space-y-6 scrollbar-hide">
+                 {/* Current Members */}
+                 <div>
+                    <h4 className="text-xs font-bold text-neutral-500 uppercase tracking-wider mb-3">Members ({groupMembersList.length})</h4>
+                    <div className="space-y-2">
+                       {groupMembersList.map(uid => {
+                          const isMe = uid === user.id;
+                          const profile = isMe ? myProfile : contacts.get(uid);
+                          const isCreator = groups.find(g => g.id === selectedGroupId)?.creator_id === uid;
+                          const amICreator = groups.find(g => g.id === selectedGroupId)?.creator_id === user.id;
+
+                          return (
+                             <div key={uid} className="flex items-center justify-between p-2 rounded-xl bg-neutral-950/50 hover:bg-neutral-800/50 border border-neutral-800/50 transition-colors">
+                                <div className="flex items-center gap-3">
+                                   <div className="w-10 h-10 rounded-full bg-neutral-800 flex items-center justify-center shrink-0 overflow-hidden ring-1 ring-neutral-700">
+                                      {profile?.avatar_url ? <img src={profile.avatar_url} className="w-full h-full object-cover" /> : <User className="w-5 h-5 text-neutral-500" />}
+                                   </div>
+                                   <div>
+                                      <p className="font-bold text-sm text-neutral-200">{isMe ? 'You' : profile?.name || (profile as any)?.email?.split('@')[0] || 'Unknown User'}</p>
+                                      {isCreator && <p className="text-[10px] text-indigo-400 font-bold uppercase tracking-wider mt-0.5">Admin</p>}
+                                   </div>
+                                </div>
+                                {(amICreator && !isMe) && (
+                                   <button onClick={async () => {
+                                      await insforge.database.from('group_members').delete().match({ group_id: selectedGroupId, user_id: uid });
+                                      loadGroupMembers(selectedGroupId);
+                                   }} className="p-2 text-red-500 hover:bg-red-500/10 rounded-lg transition-colors">
+                                      <Trash2 className="w-4 h-4" />
+                                   </button>
+                                )}
+                             </div>
+                          );
+                       })}
+                    </div>
+                 </div>
+
+                 {/* Add Members if Admin */}
+                 {groups.find(g => g.id === selectedGroupId)?.creator_id === user.id && (
+                    <div className="pt-4 border-t border-neutral-800/50">
+                       <h4 className="text-xs font-bold text-neutral-500 uppercase tracking-wider mb-3">Add Members</h4>
+                       <div className="space-y-2 max-h-48 overflow-y-auto pr-2 scrollbar-hide">
+                          {Array.from(contacts.values()).filter(c => !groupMembersList.includes(c.id)).length === 0 ? (
+                             <p className="text-sm text-neutral-500 italic p-2 bg-neutral-950/50 rounded-xl border border-neutral-800/50">No more contacts to add.</p>
+                          ) : (
+                             Array.from(contacts.values()).filter(c => !groupMembersList.includes(c.id)).map(contact => (
+                                <div key={contact.id} className="flex items-center justify-between p-2 rounded-xl bg-neutral-950/50 hover:bg-neutral-800/50 transition-colors border border-neutral-800/50">
+                                   <div className="flex items-center gap-3">
+                                      <div className="w-8 h-8 rounded-full bg-neutral-800 flex items-center justify-center shrink-0 overflow-hidden">
+                                         {contact.avatar_url ? <img src={contact.avatar_url} className="w-full h-full object-cover" /> : <User className="w-4 h-4 text-neutral-500" />}
+                                      </div>
+                                      <p className="font-medium text-sm text-neutral-300">{contact.name || contact.email.split('@')[0]}</p>
+                                   </div>
+                                   <button onClick={async () => {
+                                      await insforge.database.from('group_members').insert({ group_id: selectedGroupId, user_id: contact.id });
+                                      loadGroupMembers(selectedGroupId);
+                                   }} className="px-3 py-1.5 bg-indigo-500/10 text-indigo-400 hover:bg-indigo-500/20 rounded-lg text-xs font-bold transition-colors">
+                                      Add
+                                   </button>
+                                </div>
+                             ))
+                          )}
+                       </div>
+                    </div>
+                 )}
+              </div>
+              <div className="p-4 border-t border-neutral-800 bg-neutral-950 shrink-0">
+                 {groups.find(g => g.id === selectedGroupId)?.creator_id === user.id ? (
+                    <button onClick={async () => {
+                       if (!confirm('Are you sure you want to delete this group for everyone?')) return;
+                       await insforge.database.from('groups').delete().eq('id', selectedGroupId);
+                       setShowGroupInfo(false);
+                       setSelectedGroupId(null);
+                       setGroups(prev => prev.filter(g => g.id !== selectedGroupId));
+                    }} className="w-full flex items-center justify-center gap-2 py-3 bg-red-500/10 text-red-500 hover:bg-red-500/20 rounded-xl font-bold transition-colors text-sm">
+                       <Trash2 className="w-4 h-4" /> Delete Group
+                    </button>
+                 ) : (
+                    <button onClick={async () => {
+                       if (!confirm('Are you sure you want to leave this group?')) return;
+                       await insforge.database.from('group_members').delete().match({ group_id: selectedGroupId, user_id: user.id });
+                       setShowGroupInfo(false);
+                       setSelectedGroupId(null);
+                       setGroups(prev => prev.filter(g => g.id !== selectedGroupId));
+                    }} className="w-full flex items-center justify-center gap-2 py-3 bg-red-500/10 text-red-500 hover:bg-red-500/20 rounded-xl font-bold transition-colors text-sm">
+                       <LogOut className="w-4 h-4" /> Leave Group
+                    </button>
+                 )}
+              </div>
+           </div>
         </div>
       )}
     </div>

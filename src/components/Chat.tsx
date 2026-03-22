@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef, FormEvent } from 'react';
 import { insforge } from '../lib/insforge';
-import { Send, UserCircle2, MessageSquareOff, ChevronLeft, Image as ImageIcon, Smile, Loader2, Settings, User, Palette, X } from 'lucide-react';
+import { Send, UserCircle2, MessageSquareOff, ChevronLeft, Image as ImageIcon, Smile, Loader2, Settings, User, Palette, X, MoreVertical, Trash2, ChevronDown } from 'lucide-react';
 
 interface DirectMessage {
   id: string;
@@ -12,6 +12,8 @@ interface DirectMessage {
   image_url?: string;
   client_id?: string;
   created_at: string;
+  deleted_for_sender?: boolean;
+  deleted_for_receiver?: boolean;
 }
 
 interface UserProfile {
@@ -43,21 +45,27 @@ export default function Chat({ user }: ChatProps) {
     bio: '',
     avatar_url: '',
     chat_bubble_color: '#4f46e5',
-    chat_background_color: '#0b0f19'
+    chat_background_color: '#0b0f19',
+    chat_background_image: ''
   });
   const [draftProfile, setDraftProfile] = useState({
     name: '',
     bio: '',
     avatar_url: '',
     chat_bubble_color: '#4f46e5',
-    chat_background_color: '#0b0f19'
+    chat_background_color: '#0b0f19',
+    chat_background_image: ''
   });
   const [isSaving, setIsSaving] = useState(false);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
   const profileImageInputRef = useRef<HTMLInputElement>(null);
+  const bgImageInputRef = useRef<HTMLInputElement>(null);
   const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [showChatMenu, setShowChatMenu] = useState(false);
+  const [msgMenuOpen, setMsgMenuOpen] = useState<string | null>(null);
+  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Scroll to bottom on new message
   useEffect(() => {
@@ -79,7 +87,8 @@ export default function Chat({ user }: ChatProps) {
           bio: data.bio || '',
           avatar_url: data.avatar_url || '',
           chat_bubble_color: data.chat_bubble_color || '#4f46e5',
-          chat_background_color: data.chat_background_color || '#0b0f19'
+          chat_background_color: data.chat_background_color || '#0b0f19',
+          chat_background_image: data.chat_background_image || ''
         });
       }
     };
@@ -192,6 +201,14 @@ export default function Chat({ user }: ChatProps) {
           }
         });
 
+        // Listen for message deletion
+        insforge.realtime.on('message_deleted', (payload: any) => {
+          const { message_id } = payload.payload || payload;
+          if (message_id) {
+            setMessages(prev => prev.filter(m => m.id !== message_id && m.client_id !== message_id));
+          }
+        });
+
         // Listen for typing events
         insforge.realtime.on('typing', (payload: any) => {
           const { user_id, is_typing } = payload;
@@ -238,7 +255,8 @@ export default function Chat({ user }: ChatProps) {
                 name: payload.name ?? prev.name,
                 avatar_url: payload.avatar_url ?? prev.avatar_url,
                 chat_bubble_color: payload.chat_bubble_color ?? prev.chat_bubble_color,
-                chat_background_color: payload.chat_background_color ?? prev.chat_background_color
+                chat_background_color: payload.chat_background_color ?? prev.chat_background_color,
+                chat_background_image: payload.chat_background_image ?? prev.chat_background_image
              }));
           } else {
              setContacts(prev => {
@@ -350,6 +368,44 @@ export default function Chat({ user }: ChatProps) {
     }
   };
 
+  const handleDeleteMessage = async (msgId: string, deleteForEveryone: boolean = true, isSender: boolean = true) => {
+    setMsgMenuOpen(null);
+    if (!confirm(deleteForEveryone ? 'Delete this message for everyone?' : 'Delete this message for you?')) return;
+    
+    if (deleteForEveryone) {
+      // Optimistic UI update
+      setMessages(prev => prev.filter(m => m.id !== msgId));
+      
+      // Database delete
+      await insforge.database.from('messages').delete().eq('id', msgId);
+      
+      // Broadcast message deletion so other client removes it if they are online
+      if (insforge.realtime.isConnected) {
+        insforge.realtime.publish('chat:room-1', 'message_deleted', { message_id: msgId });
+      }
+    } else {
+      // Optimistic UI update for 'Delete for me'
+      setMessages(prev => prev.map(m => m.id === msgId ? { 
+         ...m, 
+         deleted_for_sender: isSender ? true : m.deleted_for_sender,
+         deleted_for_receiver: !isSender ? true : m.deleted_for_receiver 
+      } : m));
+      
+      const updatePayload = isSender ? { deleted_for_sender: true } : { deleted_for_receiver: true };
+      await insforge.database.from('messages').update(updatePayload).eq('id', msgId);
+    }
+  };
+
+  const handleTouchStart = (msgId: string) => {
+    longPressTimerRef.current = setTimeout(() => {
+      setMsgMenuOpen(msgId);
+    }, 2000); // 2 seconds delay
+  };
+  
+  const handleTouchEnd = () => {
+    if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
+  };
+
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || !selectedUserId) return;
@@ -408,7 +464,8 @@ export default function Chat({ user }: ChatProps) {
         bio: draftProfile.bio,
         avatar_url: draftProfile.avatar_url,
         chat_bubble_color: draftProfile.chat_bubble_color,
-        chat_background_color: draftProfile.chat_background_color
+        chat_background_color: draftProfile.chat_background_color,
+        chat_background_image: draftProfile.chat_background_image
       })
       .eq('id', user.id)
       .select()
@@ -426,7 +483,8 @@ export default function Chat({ user }: ChatProps) {
           name: draftProfile.name,
           avatar_url: draftProfile.avatar_url,
           chat_bubble_color: draftProfile.chat_bubble_color,
-          chat_background_color: draftProfile.chat_background_color
+          chat_background_color: draftProfile.chat_background_color,
+          chat_background_image: draftProfile.chat_background_image
         });
       }
     } else {
@@ -544,7 +602,16 @@ export default function Chat({ user }: ChatProps) {
       </div>
 
       {/* Main Chat Area */}
-      <div className={`flex-1 flex flex-col relative w-full overflow-hidden ${!selectedUserId ? 'hidden sm:flex' : 'flex'}`} style={{ backgroundColor: myProfile.chat_background_color }}>
+      <div 
+        className={`flex-1 flex flex-col relative w-full overflow-hidden ${!selectedUserId ? 'hidden sm:flex' : 'flex'}`} 
+        style={{ 
+          backgroundColor: myProfile.chat_background_color,
+          backgroundImage: myProfile.chat_background_image ? `url(${myProfile.chat_background_image})` : 'none',
+          backgroundSize: 'cover',
+          backgroundPosition: 'center',
+          backgroundRepeat: 'no-repeat'
+        }}
+      >
         {!selectedUserId ? (
           <div className="flex-1 flex flex-col items-center justify-center text-neutral-500 space-y-6 p-8 relative">
             <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,_rgba(79,70,229,0.05)_0%,_transparent_70%)]" />
@@ -594,6 +661,39 @@ export default function Chat({ user }: ChatProps) {
                   </div>
                 </div>
               </div>
+              
+              <div className="relative ml-auto">
+                <button 
+                  onClick={() => setShowChatMenu(!showChatMenu)}
+                  className="p-2 text-neutral-400 hover:text-white rounded-xl bg-[#0B0F19]/20 hover:bg-neutral-800 transition-colors border border-transparent hover:border-neutral-700/50"
+                  title="Chat Options"
+                >
+                  <MoreVertical className="w-5 h-5" />
+                </button>
+                {showChatMenu && (
+                  <>
+                    <div className="fixed inset-0 z-40" onClick={() => setShowChatMenu(false)} />
+                    <div className="absolute right-0 top-full mt-2 w-48 bg-neutral-900 border border-neutral-800 rounded-xl shadow-2xl overflow-hidden z-50 animate-in fade-in slide-in-from-top-2">
+                      <button
+                        onClick={async () => {
+                          setShowChatMenu(false);
+                          if (!user || !selectedUserId || !confirm('Are you sure you want to clear this entire chat history globally?')) return;
+                          
+                          setMessages([]);
+                          await insforge.database
+                            .from('messages')
+                            .delete()
+                            .or(`and(sender_id.eq.${user.id},receiver_id.eq.${selectedUserId}),and(sender_id.eq.${selectedUserId},receiver_id.eq.${user.id})`);
+                        }}
+                        className="w-full px-4 py-3 text-sm font-bold text-red-400 hover:text-red-300 hover:bg-neutral-800 flex items-center gap-3 transition-colors text-left"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                        Clear Chat
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
             </div>
 
             {/* Message Pane */}
@@ -606,9 +706,12 @@ export default function Chat({ user }: ChatProps) {
                     </p>
                   </div>
                 ) : (
-                  messages.map((msg, index) => {
+                  messages.filter(msg => {
                     const isMe = msg.sender_id === user?.id;
-                    const prevMsg = index > 0 ? messages[index - 1] : null;
+                    return !((isMe && msg.deleted_for_sender) || (!isMe && msg.deleted_for_receiver));
+                  }).map((msg, index, arr) => {
+                    const isMe = msg.sender_id === user?.id;
+                    const prevMsg = index > 0 ? arr[index - 1] : null;
                     const sameSenderAsPrev = prevMsg?.sender_id === msg.sender_id;
                     
                     const senderProfile = isMe 
@@ -632,29 +735,93 @@ export default function Chat({ user }: ChatProps) {
                           </div>
                         )}
                         <div 
-                          className={`relative max-w-[85%] sm:max-w-[70%] shadow-xl leading-relaxed break-words whitespace-pre-wrap ${
+                          className={`relative max-w-[85%] sm:max-w-[70%] shadow-xl leading-relaxed break-words whitespace-pre-wrap group/msgbubble transition-all ${
                             isMe 
                               ? 'text-white rounded-[20px] rounded-tr-[4px]' 
                               : 'bg-neutral-800 text-neutral-100 rounded-[20px] rounded-tl-[4px] border border-neutral-700/30 backdrop-blur-md'
-                          } ${sameSenderAsPrev ? 'mt-0.5' : 'mt-0'} overflow-hidden`}
+                          } ${sameSenderAsPrev ? 'mt-0.5' : 'mt-0'} overflow-visible`}
                           style={isMe ? { backgroundColor: myProfile.chat_bubble_color } : {}}
+                          onTouchStart={() => handleTouchStart(msg.id)}
+                          onTouchEnd={handleTouchEnd}
+                          onTouchMove={handleTouchEnd}
                         >
-                          {msg.image_url && (
-                             <div className="p-1">
-                               <img 
-                                 src={msg.image_url} 
-                                 alt="Shared" 
-                                 className="rounded-[16px] max-h-80 w-full object-cover cursor-pointer hover:opacity-95 transition-opacity" 
-                                 onClick={() => window.open(msg.image_url, '_blank')}
-                               />
-                             </div>
-                          )}
-                          {msg.text && (
-                            <div className="px-4 py-2.5">
-                              <p className="text-[15px]">{msg.text}</p>
+                          {/* Laptop Hover Action (Chevron) */}
+                          <div className={`absolute top-1 ${isMe ? 'right-2' : 'left-2'} opacity-0 group-hover/msgbubble:opacity-100 transition-opacity z-10 hidden sm:block`}>
+                            <button 
+                              onClick={() => setMsgMenuOpen(msgMenuOpen === msg.id ? null : msg.id)}
+                              className="p-1.5 bg-neutral-900/80 hover:bg-neutral-800 backdrop-blur-sm shadow-md rounded-full text-neutral-300 pointer-events-auto"
+                            >
+                              <ChevronDown className="w-3.5 h-3.5" />
+                            </button>
+                            
+                            {/* Message Menu */}
+                            {msgMenuOpen === msg.id && (
+                              <>
+                                <div className="fixed inset-0 z-[60]" onClick={(e) => { e.stopPropagation(); setMsgMenuOpen(null); }} />
+                                <div className={`absolute top-full mt-1 ${isMe ? 'right-0' : 'left-0'} w-48 bg-neutral-900 border border-neutral-800 rounded-xl shadow-2xl z-[70] overflow-hidden animate-in fade-in zoom-in-95`}>
+                                  <button
+                                    onClick={(e) => { e.stopPropagation(); handleDeleteMessage(msg.id, false, isMe); }}
+                                    className={`w-full px-4 py-3 text-sm font-medium text-neutral-300 hover:text-white hover:bg-neutral-800 flex items-center justify-between transition-colors text-left ${isMe ? 'border-b border-neutral-800/50' : ''}`}
+                                  >
+                                    Delete for me
+                                    <Trash2 className="w-4 h-4 opacity-70" />
+                                  </button>
+                                  {isMe && (
+                                    <button
+                                      onClick={(e) => { e.stopPropagation(); handleDeleteMessage(msg.id, true, isMe); }}
+                                      className="w-full px-4 py-3 text-sm font-medium text-red-500 hover:text-red-400 hover:bg-neutral-800 flex items-center justify-between transition-colors text-left"
+                                    >
+                                      Delete for everyone
+                                      <Trash2 className="w-4 h-4" />
+                                    </button>
+                                  )}
+                                </div>
+                              </>
+                            )}
+                          </div>
+
+                          {/* Mobile Action triggers automatically via 2-sec touch */}
+                          {msgMenuOpen === msg.id && (
+                            <div className="sm:hidden absolute top-0 right-0 left-0 bottom-0 z-[70] flex items-center justify-center pointer-events-none">
+                              <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-[65] pointer-events-auto" onClick={(e) => { e.stopPropagation(); setMsgMenuOpen(null); }} />
+                              <div className="absolute w-56 bg-neutral-900 border border-neutral-700 rounded-2xl shadow-2xl z-[70] p-1 scale-100 animate-in zoom-in-95 pointer-events-auto">
+                                 <button
+                                    onClick={(e) => { e.stopPropagation(); handleDeleteMessage(msg.id, false, isMe); }}
+                                    className={`w-full px-4 py-3.5 font-bold text-neutral-300 hover:bg-neutral-800 rounded-t-xl flex items-center justify-between text-left ${isMe ? 'border-b border-neutral-800/50' : ''}`}
+                                 >
+                                    Delete for me
+                                    <Trash2 className="w-5 h-5 opacity-70" />
+                                 </button>
+                                 {isMe && (
+                                   <button
+                                      onClick={(e) => { e.stopPropagation(); handleDeleteMessage(msg.id, true, isMe); }}
+                                      className="w-full px-4 py-3.5 font-bold text-red-500 hover:bg-neutral-800 rounded-b-xl flex items-center justify-between text-left"
+                                   >
+                                      Delete for everyone
+                                      <Trash2 className="w-5 h-5" />
+                                   </button>
+                                 )}
+                                 <button onClick={(e) => { e.stopPropagation(); setMsgMenuOpen(null); }} className="w-full px-4 py-3 mt-1 font-bold text-neutral-400 hover:bg-neutral-800 rounded-xl flex items-center justify-center">Cancel</button>
+                              </div>
                             </div>
                           )}
-                          <div className={`text-[10px] pb-1.5 pr-3 text-right font-medium opacity-60 ${!msg.text ? '-mt-6' : ''}`}>
+
+                          <div className={msg.image_url ? "" : "px-4 pt-2.5"}>
+                            {msg.image_url && (
+                               <div className="p-1">
+                                 <img 
+                                   src={msg.image_url} 
+                                   alt="Shared" 
+                                   className="rounded-[16px] max-h-80 w-full object-cover cursor-pointer hover:opacity-95 transition-opacity" 
+                                   onClick={() => window.open(msg.image_url, '_blank')}
+                                 />
+                               </div>
+                            )}
+                            {msg.text && (
+                                <p className="text-[15px]">{msg.text}</p>
+                            )}
+                          </div>
+                          <div className={`text-[10px] pb-1.5 pr-3 text-right font-medium opacity-60 ${!msg.text && !msg.image_url ? '-mt-6' : ''}`}>
                             {new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                           </div>
                         </div>
@@ -844,6 +1011,47 @@ export default function Chat({ user }: ChatProps) {
                       />
                       <span className="text-xs font-mono">{draftProfile.chat_background_color}</span>
                     </div>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="flex items-center justify-between text-sm font-bold text-neutral-400 mb-1.5 ml-1">
+                    Chat Background Image
+                    {draftProfile.chat_background_image && (
+                      <button type="button" onClick={() => setDraftProfile(prev => ({...prev, chat_background_image: ''}))} className="text-red-400 text-[11px] font-bold uppercase tracking-wider hover:text-red-300 transition-colors px-2 py-0.5 bg-red-400/10 rounded-lg">
+                        Remove
+                      </button>
+                    )}
+                  </label>
+                  <div 
+                    onClick={() => bgImageInputRef.current?.click()}
+                    className="w-full h-[120px] rounded-2xl border-2 border-dashed border-neutral-800 hover:border-indigo-500/50 hover:bg-neutral-900/50 transition-all cursor-pointer flex items-center justify-center overflow-hidden bg-neutral-950 relative group"
+                  >
+                    <input 
+                      type="file" 
+                      ref={bgImageInputRef} 
+                      className="hidden" 
+                      accept="image/*" 
+                      onChange={async (e) => {
+                        const file = e.target.files?.[0];
+                        if (!file) return;
+                        setIsSaving(true);
+                        try {
+                          const { data } = await insforge.storage.from('chat-attachments').uploadAuto(file);
+                          if (data?.url) setDraftProfile(prev => ({ ...prev, chat_background_image: data.url }));
+                        } finally {
+                          setIsSaving(false);
+                        }
+                      }} 
+                    />
+                    {draftProfile.chat_background_image ? (
+                      <img src={draftProfile.chat_background_image} className="w-full h-full object-cover opacity-60 group-hover:opacity-100 transition-opacity" />
+                    ) : (
+                      <div className="flex flex-col items-center gap-2 text-neutral-500 group-hover:text-indigo-400 transition-colors">
+                        <ImageIcon className="w-6 h-6" />
+                        <span className="text-xs font-medium">Click to upload background image</span>
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>

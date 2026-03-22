@@ -735,7 +735,7 @@ export default function Chat({ user }: ChatProps) {
                           </div>
                         )}
                         <div 
-                          className={`relative max-w-[85%] sm:max-w-[70%] shadow-xl leading-relaxed break-words whitespace-pre-wrap group/msgbubble transition-all ${
+                          className={`relative max-w-[85%] sm:max-w-[70%] shadow-xl leading-relaxed break-words whitespace-pre-wrap group/msgbubble transition-all select-none sm:select-text ${
                             isMe 
                               ? 'text-white rounded-[20px] rounded-tr-[4px]' 
                               : 'bg-neutral-800 text-neutral-100 rounded-[20px] rounded-tl-[4px] border border-neutral-700/30 backdrop-blur-md'
@@ -782,12 +782,12 @@ export default function Chat({ user }: ChatProps) {
 
                           {/* Mobile Action triggers automatically via 2-sec touch */}
                           {msgMenuOpen === msg.id && (
-                            <div className="sm:hidden absolute top-0 right-0 left-0 bottom-0 z-[70] flex items-center justify-center pointer-events-none">
-                              <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-[65] pointer-events-auto" onClick={(e) => { e.stopPropagation(); setMsgMenuOpen(null); }} />
-                              <div className="absolute w-56 bg-neutral-900 border border-neutral-700 rounded-2xl shadow-2xl z-[70] p-1 scale-100 animate-in zoom-in-95 pointer-events-auto">
+                            <div className="sm:hidden fixed inset-0 z-[100] flex flex-col justify-end pointer-events-none pb-8 px-4">
+                              <div className="absolute inset-0 bg-black/60 backdrop-blur-sm z-[65] pointer-events-auto animate-in fade-in" onClick={(e) => { e.stopPropagation(); setMsgMenuOpen(null); }} />
+                              <div className="relative w-full bg-neutral-900 border border-neutral-700 rounded-3xl shadow-2xl z-[70] p-1.5 animate-in slide-in-from-bottom-4 pointer-events-auto">
                                  <button
                                     onClick={(e) => { e.stopPropagation(); handleDeleteMessage(msg.id, false, isMe); }}
-                                    className={`w-full px-4 py-3.5 font-bold text-neutral-300 hover:bg-neutral-800 rounded-t-xl flex items-center justify-between text-left ${isMe ? 'border-b border-neutral-800/50' : ''}`}
+                                    className={`w-full px-5 py-4 font-bold text-neutral-300 hover:bg-neutral-800 rounded-t-[20px] flex items-center justify-between text-left ${isMe ? 'border-b border-neutral-800/80' : ''}`}
                                  >
                                     Delete for me
                                     <Trash2 className="w-5 h-5 opacity-70" />
@@ -795,13 +795,15 @@ export default function Chat({ user }: ChatProps) {
                                  {isMe && (
                                    <button
                                       onClick={(e) => { e.stopPropagation(); handleDeleteMessage(msg.id, true, isMe); }}
-                                      className="w-full px-4 py-3.5 font-bold text-red-500 hover:bg-neutral-800 rounded-b-xl flex items-center justify-between text-left"
+                                      className="w-full px-5 py-4 font-bold text-red-500 hover:bg-neutral-800 rounded-b-[20px] flex items-center justify-between text-left"
                                    >
                                       Delete for everyone
                                       <Trash2 className="w-5 h-5" />
                                    </button>
                                  )}
-                                 <button onClick={(e) => { e.stopPropagation(); setMsgMenuOpen(null); }} className="w-full px-4 py-3 mt-1 font-bold text-neutral-400 hover:bg-neutral-800 rounded-xl flex items-center justify-center">Cancel</button>
+                              </div>
+                              <div className="relative w-full bg-neutral-900 border border-neutral-700 rounded-3xl shadow-2xl z-[70] p-1.5 mt-2 animate-in slide-in-from-bottom-2 pointer-events-auto">
+                                 <button onClick={(e) => { e.stopPropagation(); setMsgMenuOpen(null); }} className="w-full px-5 py-3.5 font-bold text-neutral-400 hover:bg-neutral-800 rounded-[20px] flex items-center justify-center">Cancel</button>
                               </div>
                             </div>
                           )}

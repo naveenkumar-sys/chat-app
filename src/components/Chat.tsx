@@ -620,7 +620,7 @@ export default function Chat({ user }: ChatProps) {
   return (
     <div className="flex flex-col sm:flex-row h-full w-full bg-[#0B0F19] overflow-hidden relative">
       {/* Sidebar - Contacts List */}
-      <div className={`sm:border-r border-neutral-800 bg-neutral-950 flex flex-col shrink-0 shadow-inner z-10 w-full sm:w-[360px] ${selectedUserId ? 'hidden sm:flex' : 'flex'}`}>
+      <div className={`sm:border-r border-neutral-800 bg-neutral-950 flex flex-col shrink-0 shadow-inner z-10 w-full sm:w-[360px] ${(selectedUserId || selectedGroupId) ? 'hidden sm:flex' : 'flex'}`}>
         <div className="p-5 border-b border-neutral-800 bg-neutral-900/40">
           <div className="flex justify-between items-center">
             <h2 className="text-xl font-bold text-white">Messages</h2>
@@ -784,7 +784,10 @@ export default function Chat({ user }: ChatProps) {
             {/* Header for Active Chat */}
             <div className="flex items-center gap-4 px-4 sm:px-8 py-5 border-b border-neutral-800/50 bg-[#0B0F19]/80 shrink-0 sticky top-0 z-20 shadow-sm backdrop-blur-xl">
               <button 
-                onClick={() => setSelectedUserId(null)}
+                onClick={() => {
+                   setSelectedUserId(null);
+                   setSelectedGroupId(null);
+                }}
                 className="sm:hidden p-2.5 -ml-2 text-neutral-400 hover:text-white rounded-xl bg-neutral-900/50 active:scale-90 transition-transform"
               >
                 <ChevronLeft className="w-6 h-6" />
